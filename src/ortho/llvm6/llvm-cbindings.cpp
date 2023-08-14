@@ -31,14 +31,18 @@
 #include "llvm-c/BitWriter.h"
 
 #include "llvm-c/Analysis.h"
+
+#if LLVM_VERSION_MAJOR >= 6
+#define USE_DEBUG
+#endif
+
+#if LLVM_VERSION_MAJOR >= 13
+#include <llvm-c/Transforms/PassBuilder.h>
+#else
 #include "llvm-c/Transforms/Scalar.h"
 #if LLVM_VERSION_MAJOR >= 7
 //  Not present in llvm-6, present in llvm-7
 #include "llvm-c/Transforms/Utils.h"
-#endif
-
-#if LLVM_VERSION_MAJOR >= 6
-#define USE_DEBUG
 #endif
 
 #if LLVM_VERSION_MAJOR >= 15
@@ -202,6 +206,20 @@ generateCommon()
   }
 
   if (Optimization > LLVMCodeGenLevelNone) {
+#if LLVM_VERSION_MAJOR >= 13
+   LLVMPassBuilderOptionsRef options = LLVMCreatePassBuilderOptions();
+   LLVMPassBuilderOptionsSetDebugLogging(options, false);
+   LLVMPassBuilderOptionsSetLoopVectorization(options, false);
+   LLVMPassBuilderOptionsSetLoopInterleaving(options, false);
+   LLVMPassBuilderOptionsSetSLPVectorization(options, false);
+   LLVMPassBuilderOptionsSetLoopUnrolling(options, false);
+   LLVMPassBuilderOptionsSetCallGraphProfile(options, false);
+
+   LLVMRunPasses(TheModule, "simplifycfg,mem2reg", TheTargetMachine, options);
+
+   LLVMDisposePassBuilderOptions(options);
+#else
+
     LLVMPassManagerRef PassManager;
     PassManager = LLVMCreateFunctionPassManagerForModule (TheModule);
 
@@ -213,6 +231,7 @@ generateCommon()
 	 Func = LLVMGetNextFunction(Func)) {
       LLVMRunFunctionPassManager (PassManager, Func);
     }
+#endif
   }
 }
 extern "C" void
