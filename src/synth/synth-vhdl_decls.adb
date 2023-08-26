@@ -428,7 +428,9 @@ package body Synth.Vhdl_Decls is
               | Iir_Kind_Subtype_Declaration
               | Iir_Kind_Constant_Declaration
               | Iir_Kind_Variable_Declaration
-              | Iir_Kind_File_Declaration =>
+              | Iir_Kind_File_Declaration
+              | Iir_Kind_Package_Declaration
+              | Iir_Kind_Package_Body =>
                Elab.Vhdl_Decls.Elab_Declaration
                  (Obj_Inst, Decl, True, Last_Type);
             when Iir_Kind_Function_Declaration
@@ -604,7 +606,6 @@ package body Synth.Vhdl_Decls is
 
       Vhdl_Stmts.Synth_Assignment_Prefix
         (Syn_Inst, Get_Name (Decl), Base, Typ, Off);
-      Typ := Unshare (Typ, Instance_Pool);
       if Base.Val.Kind = Value_Net then
          --  Object is a net if it is not writable.  Extract the
          --  bits for the alias.
@@ -615,9 +616,15 @@ package body Synth.Vhdl_Decls is
       else
          Res := Create_Value_Alias (Base, Off, Typ, Expr_Pool'Access);
       end if;
-      if Obj_Typ /= null then
+      if Obj_Typ /= null
+        and then Obj_Typ.Kind not in Type_Scalars
+      then
+         --  Reshape composite types
+         --  (but not scalar, as it will suppress the alias of the value is
+         --   constant - humm).
          Res := Synth_Subtype_Conversion (Syn_Inst, Res, Obj_Typ, True, Decl);
       end if;
+      Res.Typ := Unshare (Res.Typ, Instance_Pool);
       Res := Unshare (Res, Instance_Pool);
       Release_Expr_Pool (Marker);
       Create_Object (Syn_Inst, Decl, Res);
@@ -785,9 +792,13 @@ package body Synth.Vhdl_Decls is
          when Iir_Kind_Suspend_State_Declaration =>
             declare
                Val : Valtyp;
+               Typ : Type_Acc;
             begin
+               --  Use Integer for suspend state.  Just to get a size.
+               Typ := Get_Subtype_Object
+                 (Syn_Inst, Vhdl.Std_Package.Integer_Subtype_Definition);
                Current_Pool := Instance_Pool;
-               Val := Create_Value_Memtyp (Create_Memory_U32 (0));
+               Val := Create_Value_Memtyp (Create_Memory_Zero (Typ));
                Current_Pool := Expr_Pool'Access;
                Create_Object (Syn_Inst, Decl, Val);
             end;

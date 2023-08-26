@@ -42,7 +42,6 @@ with PSL.Subsets;
 with Elab.Debugger;
 with Elab.Vhdl_Types;
 with Elab.Vhdl_Debug;
-with Elab.Vhdl_Objtypes; use Elab.Vhdl_Objtypes;
 
 with Synth.Errors;
 with Synth.Vhdl_Stmts; use Synth.Vhdl_Stmts;
@@ -2889,6 +2888,73 @@ package body Simul.Vhdl_Simul is
       pragma Assert (Areapools.Is_Empty (Instance_Pool.all));
    end Resolution_Proc;
 
+   procedure Std_Resolve_Proc (Sig_Addr : System.Address;
+                               Val : System.Address;
+                               Bool_Vec : System.Address;
+                               Vec_Len : Ghdl_Index_Type;
+                               Nbr_Drv : Ghdl_Index_Type;
+                               Nbr_Ports : Ghdl_Index_Type);
+   pragma Convention (C, Std_Resolve_Proc);
+
+   Resolution_Table  : constant Table_2d :=
+   --  UX01ZWLH-
+     ("UUUUUUUUU",   --  U
+      "UXXXXXXXX",   --  X
+      "UX0X0000X",   --  0
+      "UXX11111X",   --  1
+      "UX01ZWLHX",   --  Z
+      "UX01WWWWX",   --  W
+      "UX01LWLWX",   --  L
+      "UX01HWWHX",   --  H
+      "UXXXXXXXX"    --  -
+     );
+
+   procedure Std_Resolve_Proc (Sig_Addr : System.Address;
+                               Val : System.Address;
+                               Bool_Vec : System.Address;
+                               Vec_Len : Ghdl_Index_Type;
+                               Nbr_Drv : Ghdl_Index_Type;
+                               Nbr_Ports : Ghdl_Index_Type)
+   is
+      pragma Unreferenced (Val, Vec_Len);
+
+      S : constant Ghdl_Signal_Ptr := Read_Sig (To_Memory_Ptr (Sig_Addr));
+
+      Res, Last : Std_Ulogic;
+      Num : Natural;
+
+      type Bool_Array is array (1 .. Nbr_Drv) of Boolean;
+      Vec : Bool_Array;
+      pragma Import (Ada, Vec);
+      for Vec'Address use Bool_Vec;
+   begin
+      Res := 'Z';
+      Num := 0;
+      Last := 'Z';
+
+      --  Ports.
+      for I in 1 .. Nbr_Ports loop
+         Last := Std_Ulogic'Val (Ghdl_Signal_Read_Port (S, I - 1).E8);
+         Res := Resolution_Table (Res, Last);
+         Num := Num + 1;
+      end loop;
+
+      --  Drivers.
+      for I in 1 .. Nbr_Drv loop
+         if Vec (I) then
+            Last := Std_Ulogic'Val (Ghdl_Signal_Read_Driver (S, I - 1).E8);
+            Res := Resolution_Table (Res, Last);
+            Num := Num + 1;
+         end if;
+      end loop;
+
+      --  Set driving value.
+      if Num = 1 then
+         Res := Last;
+      end if;
+      S.Driving_Value.E8 := Ghdl_E8'Val (Std_Ulogic'Pos (Res));
+   end Std_Resolve_Proc;
+
    function Create_Scalar_Signal (Typ : Type_Acc; Val : Ghdl_Value_Ptr)
                                  return Ghdl_Signal_Ptr is
    begin
@@ -2990,11 +3056,21 @@ package body Simul.Vhdl_Simul is
             else
                Resolv_Func := Null_Node;
             end if;
+
+            --  Handle std_logic in an optimized way.
+            --  Note: Resolved may not be set.
             if Resolv_Func /= Null_Node
-              and then
-              (Vec (Sig_Off).Total > 1
-                 or else Resolv_Func /= Vhdl.Ieee.Std_Logic_1164.Resolved)
+              and then Resolv_Func = Vhdl.Ieee.Std_Logic_1164.Resolved
             then
+               if Vec (Sig_Off).Total > 1 then
+                  pragma Assert (Typ.W = 1);
+                  Sub_Resolved := True;
+                  Grt.Signals.Ghdl_Signal_Create_Resolution
+                    (Std_Resolve_Proc'Access,
+                     To_Address (Sig_Index (E.Sig, Sig_Off)),
+                     System.Null_Address, 1);
+               end if;
+            elsif Resolv_Func /= Null_Node then
                Sub_Resolved := True;
                Arr_Type :=
                  Get_Type (Get_Interface_Declaration_Chain (Resolv_Func));
@@ -3075,7 +3151,8 @@ package body Simul.Vhdl_Simul is
          Kind := Kind_Signal_No;
       end if;
 
-      Grt.Signals.Ghdl_Signal_Set_Mode_Kind (Get_Signal_Mode (E), Kind, True);
+      Grt.Signals.Ghdl_Signal_Set_Mode_Kind
+        (Get_Signal_Mode (E), Kind, E.Has_Active);
 
       Create_Signal (E.Val, 0, Sig_Type, E.Typ, E.Nbr_Sources.all, False);
    end Create_User_Signal;
@@ -3314,7 +3391,8 @@ package body Simul.Vhdl_Simul is
          begin
             pragma Assert (E.Sig = null);
             if E.Collapsed_By /= No_Signal_Index then
-               E.Sig := Signals_Table.Table (E.Collapsed_By).Sig;
+               E.Sig := Sig_Index (Signals_Table.Table (E.Collapsed_By).Sig,
+                                   E.Collapsed_Offs.Net_Off);
                --  E.Val will be assigned in Collapse_Signals.
             else
                E.Sig := Alloc_Signal_Memory (E.Typ, Global_Pool'Access);
@@ -3411,24 +3489,27 @@ package body Simul.Vhdl_Simul is
    procedure Collapse_Signal (E : in out Signal_Entry)
    is
       Ec : Signal_Entry renames Signals_Table.Table (E.Collapsed_By);
+      Nsig : constant Memory_Ptr :=
+        Sig_Index (Ec.Sig, E.Collapsed_Offs.Net_Off);
+      Nval : constant Memory_Ptr := Ec.Val + E.Collapsed_Offs.Mem_Off;
    begin
       if Get_Mode (E.Decl) in Iir_Out_Modes then
          --  As an out connection creates a source, if a signal is
          --  collapsed and has no source, an extra source needs to be
          --  created.
          Add_Extra_Driver_To_Signal
-           (Ec.Sig, E.Typ, E.Val_Init, 0, E.Nbr_Sources.all);
+           (Nsig, E.Typ, E.Val_Init, 0, E.Nbr_Sources.all);
 
          --  The signal value is the value of the collapsed signal.
          --  Keep default value.
-         Copy_Memory (Ec.Val, E.Val_Init, E.Typ.Sz);
+         Copy_Memory (Nval, E.Val_Init, E.Typ.Sz);
          Exec_Write_Signal
-           (Ec.Sig, (E.Typ, E.Val_Init), Write_Signal_Driving_Value);
+           (Nsig, (E.Typ, E.Val_Init), Write_Signal_Driving_Value);
       end if;
 
-      E.Val := Ec.Val;
+      E.Val := Nval;
       --  Already done for simulation but not for compilation.
-      E.Sig := Ec.Sig;
+      E.Sig := Nsig;
    end Collapse_Signal;
 
    procedure Collapse_Signals is

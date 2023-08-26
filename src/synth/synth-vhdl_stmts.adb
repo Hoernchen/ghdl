@@ -1997,13 +1997,7 @@ package body Synth.Vhdl_Stmts is
          Conv := Null_Node;
       end if;
 
-      --  Special case for protected type as the slot describes
-      --  declarations.
-      if Get_Kind (Inter_Type) = Iir_Kind_Protected_Type_Declaration then
-         Inter_Typ := Protected_Type;
-      else
-         Inter_Typ := Get_Subtype_Object (Subprg_Inst, Inter_Type);
-      end if;
+      Inter_Typ := Get_Subtype_Object (Subprg_Inst, Inter_Type);
 
       if Get_Kind (Inter) = Iir_Kind_Interface_Constant_Declaration
         or else (Get_Kind (Inter) = Iir_Kind_Interface_Variable_Declaration
@@ -3708,6 +3702,7 @@ package body Synth.Vhdl_Stmts is
          if Cond /= Null_Node then
             Mark_Expr_Pool (Marker);
             Val := Synth_Expression_With_Type (C.Inst, Cond, Boolean_Type);
+            exit when Val = No_Valtyp;
             pragma Assert (Is_Static (Val.Val));
             Cv := Read_Discrete (Val) = 0;
             Release_Expr_Pool (Marker);
@@ -4436,10 +4431,25 @@ package body Synth.Vhdl_Stmts is
             if Get_Kind (Unit) = Iir_Kind_Design_Unit then
                Lib := Get_Library (Get_Design_File (Unit));
                if Get_Identifier (Lib) = Std_Names.Name_Ieee then
-                  Error_Msg_Synth (Syn_Inst, Expr,
-                                   "unhandled call to ieee function %i", +Imp);
-                  Set_Error (Syn_Inst);
-                  return No_Valtyp;
+                  case Get_Identifier (Pkg) is
+                     when Std_Names.Name_Std_Logic_1164
+                        | Std_Names.Name_Numeric_Std
+                        | Std_Names.Name_Numeric_Bit
+                        | Std_Names.Name_Numeric_Std_Unsigned
+                        | Std_Names.Name_Math_Real
+                        | Std_Names.Name_Std_Logic_Unsigned
+                        | Std_Names.Name_Std_Logic_Signed
+                        | Std_Names.Name_Std_Logic_Misc
+                        | Std_Names.Name_Std_Logic_Arith =>
+                        Error_Msg_Synth
+                          (Syn_Inst, Expr,
+                           "unhandled call to ieee function %i", +Imp);
+                        Set_Error (Syn_Inst);
+                        return No_Valtyp;
+                     when others =>
+                        --  Other ieee packages are handled as normal packages.
+                        null;
+                  end case;
                end if;
             end if;
          end if;

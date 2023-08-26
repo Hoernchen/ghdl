@@ -16,6 +16,7 @@
 --  You should have received a copy of the GNU General Public License
 --  along with this program.  If not, see <gnu.org/licenses>.
 
+with Flags;
 with Types_Utils; use Types_Utils;
 with Std_Names;
 with Mutils; use Mutils;
@@ -2455,6 +2456,7 @@ package body Synth.Vhdl_Expr is
 
    function Synth_Short_Circuit (Syn_Inst : Synth_Instance_Acc;
                                  Id : And_Or_Module_Id;
+                                 Neg : Boolean;
                                  Left_Expr : Node;
                                  Right_Expr : Node;
                                  Typ : Type_Acc;
@@ -2484,6 +2486,9 @@ package body Synth.Vhdl_Expr is
         and then Get_Static_Discrete (Left) = Val
       then
          --  Short-circuit when the left operand determines the result.
+         if Neg then
+            Val := 1 - Val;
+         end if;
          return Create_Value_Discrete (Val, Typ);
       end if;
 
@@ -2499,6 +2504,9 @@ package body Synth.Vhdl_Expr is
         and then Get_Static_Discrete (Right) = Val
       then
          --  If the right operand can determine the result, return it.
+         if Neg then
+            Val := 1 - Val;
+         end if;
          return Create_Value_Discrete (Val, Typ);
       end if;
 
@@ -2519,8 +2527,13 @@ package body Synth.Vhdl_Expr is
       else
          N := Build_Dyadic (Ctxt, Id, Nl, Nr);
       end if;
-
       Set_Location (N, Expr);
+
+      if Neg then
+         N := Build_Monadic (Ctxt, Id_Not, N);
+         Set_Location (N, Expr);
+      end if;
+
       return Create_Value_Net (N, Typ);
    end Synth_Short_Circuit;
 
@@ -2572,20 +2585,36 @@ package body Synth.Vhdl_Expr is
                case Def is
                   when Iir_Predefined_Boolean_And =>
                      return Synth_Short_Circuit
-                       (Syn_Inst, Id_And, Get_Left (Expr), Get_Right (Expr),
-                        Boolean_Type, Expr);
+                       (Syn_Inst, Id_And, False,
+                        Get_Left (Expr), Get_Right (Expr), Boolean_Type, Expr);
                   when Iir_Predefined_Boolean_Or =>
                      return Synth_Short_Circuit
-                       (Syn_Inst, Id_Or, Get_Left (Expr), Get_Right (Expr),
-                        Boolean_Type, Expr);
+                       (Syn_Inst, Id_Or, False,
+                        Get_Left (Expr), Get_Right (Expr), Boolean_Type, Expr);
+                  when Iir_Predefined_Boolean_Nand =>
+                     return Synth_Short_Circuit
+                       (Syn_Inst, Id_And, True,
+                        Get_Left (Expr), Get_Right (Expr), Boolean_Type, Expr);
+                  when Iir_Predefined_Boolean_Nor =>
+                     return Synth_Short_Circuit
+                       (Syn_Inst, Id_Or, True,
+                        Get_Left (Expr), Get_Right (Expr), Boolean_Type, Expr);
                   when Iir_Predefined_Bit_And =>
                      return Synth_Short_Circuit
-                       (Syn_Inst, Id_And, Get_Left (Expr), Get_Right (Expr),
-                        Bit_Type, Expr);
+                       (Syn_Inst, Id_And, False,
+                        Get_Left (Expr), Get_Right (Expr), Bit_Type, Expr);
                   when Iir_Predefined_Bit_Or =>
                      return Synth_Short_Circuit
-                       (Syn_Inst, Id_Or, Get_Left (Expr), Get_Right (Expr),
-                        Bit_Type, Expr);
+                       (Syn_Inst, Id_Or, False,
+                        Get_Left (Expr), Get_Right (Expr), Bit_Type, Expr);
+                  when Iir_Predefined_Bit_Nand =>
+                     return Synth_Short_Circuit
+                       (Syn_Inst, Id_And, True,
+                        Get_Left (Expr), Get_Right (Expr), Bit_Type, Expr);
+                  when Iir_Predefined_Bit_Nor =>
+                     return Synth_Short_Circuit
+                       (Syn_Inst, Id_Or, True,
+                        Get_Left (Expr), Get_Right (Expr), Bit_Type, Expr);
                   when Iir_Predefined_None =>
                      if Error_Ieee_Operator (Syn_Inst, Imp, Expr) then
                         return No_Valtyp;
@@ -2631,6 +2660,7 @@ package body Synth.Vhdl_Expr is
             | Iir_Kind_Above_Attribute =>
             declare
                Res : Valtyp;
+               Init : Valtyp;
             begin
                Res := Synth_Name (Syn_Inst, Expr);
                if Res.Val /= null then
@@ -2642,10 +2672,38 @@ package body Synth.Vhdl_Expr is
                      if Hook_Signal_Expr /= null then
                         return Hook_Signal_Expr (Res);
                      end if;
-                     Error_Msg_Synth
-                       (Syn_Inst, Expr,
-                        "cannot use signal value during elaboration");
-                     return No_Valtyp;
+                     if Flags.Flag_Relaxed_Rules then
+                        Warning_Msg_Synth
+                          (Warnid_Elaboration, +Expr,
+                           "cannot use signal value during elaboration");
+                        if Res.Val.Kind = Value_Signal then
+                           --  The signal may have no default value.
+                           if Res.Val.Init = null then
+                              Init := Create_Value_Memory
+                                (Res.Typ, Current_Pool);
+                              Write_Value_Default (Init.Val.Mem, Res.Typ);
+                              --  Do not write the default value, even if it
+                              --  were allocated on the instance_pool, it
+                              --  might be deallocated after a subprogram call.
+                              Res := (Res.Typ, Init.Val);
+                           else
+                              Res := (Res.Typ, Res.Val.Init);
+                           end if;
+                        elsif Res.Val.Kind = Value_Alias then
+                           Res := Create_Value_Memtyp
+                             ((Res.Val.A_Typ,
+                               Res.Val.A_Obj.Init.Mem
+                                 + Res.Val.A_Off.Mem_Off));
+                        else
+                           Res := No_Valtyp;
+                        end if;
+                        return Res;
+                     else
+                        Error_Msg_Synth
+                          (Syn_Inst, Expr,
+                           "cannot use signal value during elaboration");
+                        return No_Valtyp;
+                     end if;
                   elsif (Res.Val.Kind = Value_Quantity
                            or else
                            (Res.Val.Kind = Value_Alias
